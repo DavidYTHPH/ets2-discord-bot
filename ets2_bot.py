@@ -6,9 +6,9 @@ import re
 from playwright.async_api import async_playwright
 
 # --- CONFIGURATION FROM ENVIRONMENT VARIABLES ---
-TOKEN = os.getenv("MTUwODYxNDI5MzE5MTUyODQ2OA.GcEmdU.PYxg-xPgVRpINje1NiyfXlvRh4Uk2rH5Vi9au4")
+TOKEN = os.getenv("DISCORD_TOKEN")
 PANEL_URL = "https://de4.assettohosting.com:60081/server-control"
-CHANNEL_ID = int(os.getenv("1508575873798770862", "0"))
+CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
 intents = discord.Intents.default()
 intents.message_content = True
