@@ -6,10 +6,11 @@ import re
 import sys
 from playwright.async_api import async_playwright
 
-# --- AUTOMATIC BROWSER INSTALLATION FOR RAILWAY ---
-# This forces the server to download Chromium on startup if it's missing
-print("Checking for Playwright browsers...")
-os.system("python -m playwright install chromium")
+# --- AUTOMATIC BROWSER + SYSTEM DEPENDENCY INSTALLATION ---
+# This forces the Railway Linux container to install both Chromium and its missing system libraries on startup
+print("Installing missing Linux system dependencies and Chromium... Please wait.")
+os.system("python -m playwright install --with-deps chromium")
+print("Installation complete! Starting bot...")
 
 # --- CONFIGURATION FROM ENVIRONMENT VARIABLES ---
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -25,8 +26,11 @@ last_known_id = None
 async def fetch_convoy_id():
     async with async_playwright() as p:
         try:
-            # Added headless shell argument for cloud compatibility
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--single-process'])
+            # Launched with cloud-compatible arguments to bypass security sandbox errors
+            browser = await p.chromium.launch(
+                headless=True, 
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--single-process']
+            )
             page = await browser.new_page()
             await page.goto(PANEL_URL, timeout=60000)
             await page.wait_for_load_state("networkidle")
@@ -55,14 +59,16 @@ async def on_ready():
 async def check_server_id():
     global last_known_id
     if CHANNEL_ID == 0:
+        print("Error: DISCORD_CHANNEL_ID environment variable is missing or set to 0.")
         return
+        
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
-        print(f"Could not find channel with ID {CHANNEL_ID}")
+        print(f"Error: Could not find channel with ID {CHANNEL_ID}. Make sure the bot is invited to that server.")
         return
 
     current_id = await fetch_convoy_id()
-    print(f"Scraped ID from panel: {current_id}") # Log this to monitor progress
+    print(f"Scraped ID from panel: {current_id}")
     
     if current_id and current_id != last_known_id:
         last_known_id = current_id
@@ -71,6 +77,7 @@ async def check_server_id():
             description=f"AssettoHosting has generated a new Search ID for the lobby.\n\n**Search ID:** `{current_id}`",
             color=discord.Color.orange()
         )
+        embed.set_footer(text="Auto-detected from AssettoHosting Panel")
         await channel.send(embed=embed)
 
 bot.run(TOKEN)
