@@ -126,10 +126,8 @@ async def convoyid(interaction: discord.Interaction):
 # --- COMMAND 2: IMMUTABLE OPENID LOGIN VIA GLOBAL HANDSHAKE PORTAL ---
 @bot.tree.command(name="link", description="Log in via official Steam OpenID to connect your account profile securely.")
 async def link(interaction: discord.Interaction):
-    # Utilizing an ephemeral token generation view means this instantly renders with 0 loop delay!
     await interaction.response.defer(ephemeral=True)
     
-    # We use steamid.xyz's secure public endpoint, which routes Steam login data seamlessly straight to Discord bots!
     secure_global_auth_url = f"https://steamid.xyz/auth?user={interaction.user.id}"
     
     embed = discord.Embed(
@@ -157,7 +155,6 @@ async def link(interaction: discord.Interaction):
                 
             await btn_interaction.response.defer(ephemeral=True)
             
-            # Poll the verification matrix node to extract their authorized ID
             poll_api = f"https://api.steamid.xyz/v1/identify/{self.target_user_id}"
             try:
                 async with aiohttp.ClientSession() as session:
@@ -167,7 +164,6 @@ async def link(interaction: discord.Interaction):
                             if data.get("verified") and "steamid64" in data:
                                 verified_id64 = str(data["steamid64"])
                                 
-                                # Lock it into our local JSON database file array cleanly
                                 db = load_db()
                                 db[str(self.target_user_id)] = verified_id64
                                 save_db(db)
@@ -204,7 +200,6 @@ async def steamid(interaction: discord.Interaction, target_member: discord.Membe
         else:
             await interaction.followup.send(embed=build_steam_embed(result))
     else:
-        # Secure string matching fallback engine
         steam_target = search_user.display_name
         result = await resolve_steam_user_by_name(steam_target)
         if "error" in result and steam_target != search_user.name:
