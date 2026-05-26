@@ -40,7 +40,6 @@ def save_db(data):
 # --- MUSIC BOT SETTINGS & QUEUE ---
 music_queues = {}
 
-# 🟢 THE YOUTUBE BYPASS: Forces yt-dlp to pretend it's an Android phone to bypass IP bans
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -50,10 +49,15 @@ YTDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'extractor_args': {'youtube': {'client': ['android', 'ios']}} 
+    'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
 }
 
-# Fixes stream drops for long songs
+# 🟢 THE MAGIC BULLET: Checks for BOTH common cookie file names to bypass IP bans!
+if os.path.exists("cookies.txt"):
+    YTDL_OPTIONS['cookiefile'] = 'cookies.txt'
+elif os.path.exists("www.youtube.com_cookies.txt"):
+    YTDL_OPTIONS['cookiefile'] = 'www.youtube.com_cookies.txt'
+
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn -sn'
@@ -258,20 +262,19 @@ async def play(interaction: discord.Interaction, search: str):
     if not vc:
         vc = await interaction.user.voice.channel.connect()
 
-    # 🟢 SPOTIFY SCRAPER BYPASS
+    # 🟢 BULLETPROOF SPOTIFY API BYPASS
     if "spotify.com" in search:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(search) as resp:
-                    html = await resp.text()
-                    title_match = re.search(r'<title>(.*?)</title>', html)
-                    if title_match:
-                        raw_title = title_match.group(1)
-                        # Converts "Song - song and lyrics by Artist | Spotify" to "Song Artist audio"
-                        clean_title = raw_title.split("|")[0].replace(" - song and lyrics by", "").strip()
-                        search = f"ytsearch:{clean_title} audio"
+                async with session.get(f"https://open.spotify.com/oembed?url={search}") as resp:
+                    if resp.status == 200:
+                        sp_data = await resp.json()
+                        search = f"ytsearch:{sp_data.get('title')} {sp_data.get('author_name')} audio"
+                    else:
+                        await interaction.followup.send("❌ Could not read that Spotify link. Try typing the song name instead.")
+                        return
         except Exception as e:
-            print(f"Spotify scrape failed: {e}")
+            print(f"Spotify API Error: {e}")
 
     # 🔴 YOUTUBE SEARCH FALLBACK
     if not search.startswith("http") and not search.startswith("ytsearch:"):
@@ -304,7 +307,11 @@ async def play(interaction: discord.Interaction, search: str):
             
     except Exception as e:
         print(f"YTDL ERROR: {str(e)}")
-        await interaction.followup.send(f"❌ **Error finding song.** YouTube might be temporarily blocking the connection. Try a different track name.")
+        error_msg = str(e).lower()
+        if "sign in" in error_msg or "bot" in error_msg:
+            await interaction.followup.send("❌ **Error:** YouTube blocked the server. Please ensure `cookies.txt` is uploaded to your GitHub repo!")
+        else:
+            await interaction.followup.send(f"❌ **Error finding song:** YouTube refused the connection.")
 
 @bot.tree.command(name="skip", description="[MUSIC] Skip the currently playing song.")
 async def skip(interaction: discord.Interaction):
