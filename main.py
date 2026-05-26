@@ -7,6 +7,7 @@ import re
 import json
 import aiohttp
 from aiohttp import web
+import yt_dlp
 
 # --- CONFIGURATION FROM ENVIRONMENT VARIABLES ---
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -32,6 +33,36 @@ def load_db():
 def save_db(data):
     with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
 
+# --- MUSIC BOT SETTINGS & QUEUE ---
+music_queues = {}
+
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0'
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+def play_next(guild_id, vc):
+    if guild_id in music_queues and len(music_queues[guild_id]) > 0:
+        song = music_queues[guild_id].pop(0)
+        vc.play(discord.FFmpegPCMAudio(song['url'], **FFMPEG_OPTIONS), after=lambda e: play_next(guild_id, vc))
+    else:
+        # If queue is empty, safely disconnect
+        if vc and vc.is_connected():
+            asyncio.run_coroutine_threadsafe(vc.disconnect(), bot.loop)
+
 # --- ASYNCHRONOUS STEAM API RESOLVER ---
 async def resolve_steam_user(steam_id_64):
     if not STEAM_API_KEY:
@@ -50,7 +81,6 @@ async def resolve_steam_user(steam_id_64):
                 id_num = int(steam_id_64)
                 steam_id_3 = f"[U:1:{id_num - 76561197960265728}]"
                 
-                # --- MODERNIZED DATA EXTRACTION ---
                 personastate = player_data.get("personastate", 0)
                 state_colors = {0: 0x747f8d, 1: 0x43b581, 2: 0xf04747, 3: 0xfaa61a, 4: 0xfaa61a, 5: 0x43b581, 6: 0x43b581}
                 state_text = {0: "⚫ Offline", 1: "🟢 Online", 2: "🔴 Busy", 3: "🟡 Away", 4: "🌙 Snooze", 5: "📦 Looking to Trade", 6: "🎮 Looking to Play"}
@@ -94,7 +124,7 @@ async def resolve_steam_user_by_name(name_string):
     except:
         return {"error": "Failed to connect to Steam database servers."}
 
-# --- MODERNIZED UI BUILDERS ---
+# --- UI BUILDERS ---
 def build_steam_embed(result):
     embed = discord.Embed(title=f"👤 {result['name']}", color=result["color"])
     embed.set_thumbnail(url=result["avatar"])
@@ -108,10 +138,8 @@ def build_steam_embed(result):
         desc += f"**Joined Steam:** <t:{result['timecreated']}:R>\n"
         
     embed.description = desc + "\n"
-
     embed.add_field(name="🌐 SteamID64", value=f"```\n{result['id64']}\n```", inline=True)
     embed.add_field(name="🆔 SteamID3", value=f"```\n{result['id3']}\n```", inline=True)
-    
     embed.set_footer(text="Verified via Native Server Integration", icon_url="https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Steam_icon_logo.svg/512px-Steam_icon_logo.svg.png")
     return embed
 
@@ -172,6 +200,7 @@ class ConvoyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.voice_states = True # Required for music
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -209,7 +238,81 @@ async def fetch_convoy_id():
                 return None
     except: return None
 
-# --- PUBLIC COMMANDS ---
+# --- 🎵 MUSIC COMMANDS ---
+@bot.tree.command(name="play", description="[MUSIC] Search and play a song in your voice channel.")
+@app_commands.describe(search="The song name or YouTube link")
+async def play(interaction: discord.Interaction, search: str):
+    await interaction.response.defer(ephemeral=False)
+    
+    if not interaction.user.voice:
+        await interaction.followup.send("❌ You need to be in a voice channel to use this!")
+        return
+        
+    vc = interaction.guild.voice_client
+    if not vc:
+        vc = await interaction.user.voice.channel.connect()
+        
+    # Run the YT search in a background thread so the bot doesn't freeze
+    loop = asyncio.get_event_loop()
+    try:
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{search}", download=False))
+        if 'entries' in data and len(data['entries']) > 0:
+            song_info = data['entries'][0]
+        else:
+            song_info = data
+            
+        song_dict = {'url': song_info['url'], 'title': song_info.get('title', 'Unknown Audio')}
+        
+        guild_id = interaction.guild.id
+        if guild_id not in music_queues:
+            music_queues[guild_id] = []
+            
+        music_queues[guild_id].append(song_dict)
+        
+        if not vc.is_playing() and not vc.is_paused():
+            play_next(guild_id, vc)
+            await interaction.followup.send(f"▶️ **Now Playing:** `{song_dict['title']}`")
+        else:
+            await interaction.followup.send(f"📝 **Added to Queue:** `{song_dict['title']}` (Position: {len(music_queues[guild_id])})")
+            
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error playing song. YouTube might be blocking the connection.")
+
+@bot.tree.command(name="skip", description="[MUSIC] Skip the currently playing song.")
+async def skip(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and vc.is_playing():
+        vc.stop() # Stopping triggers the 'after' callback to play next
+        await interaction.response.send_message("⏭️ **Skipped!**")
+    else:
+        await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
+
+@bot.tree.command(name="stop", description="[MUSIC] Stop the music and clear the queue.")
+async def stop(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    if guild_id in music_queues:
+        music_queues[guild_id] = []
+        
+    vc = interaction.guild.voice_client
+    if vc:
+        await vc.disconnect()
+        await interaction.response.send_message("⏹️ **Music stopped and disconnected.**")
+    else:
+        await interaction.response.send_message("❌ I am not in a voice channel.", ephemeral=True)
+
+@bot.tree.command(name="queue", description="[MUSIC] View the upcoming songs in the queue.")
+async def queue(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    if guild_id in music_queues and len(music_queues[guild_id]) > 0:
+        q_list = "\n".join([f"{i+1}. {song['title']}" for i, song in enumerate(music_queues[guild_id][:10])])
+        embed = discord.Embed(title="🎶 Current Queue", description=f"```{q_list}```", color=discord.Color.blurple())
+        if len(music_queues[guild_id]) > 10:
+            embed.set_footer(text=f"...and {len(music_queues[guild_id]) - 10} more songs.")
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("📂 The queue is currently empty.")
+
+# --- UTILITY COMMANDS (Steam/ETS2) ---
 @bot.tree.command(name="convoyid", description="Fetch the current live ETS2 Convoy Search ID.")
 async def convoyid(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
@@ -224,11 +327,9 @@ async def convoyid(interaction: discord.Interaction):
 @bot.tree.command(name="link", description="Securely log in and link your official Steam account.")
 async def link(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    
-    # 🛑 CHECK IF ALREADY LINKED
     db = load_db()
     if str(interaction.user.id) in db:
-        await interaction.followup.send("✅ You are already verified and securely linked! If you need to change your linked account, please ask a Server Admin to reset your profile.", ephemeral=True)
+        await interaction.followup.send("✅ You are already verified and securely linked! If you need to change your linked account, please ask a Server Admin.", ephemeral=True)
         return
 
     base_url = os.getenv("PUBLIC_URL", "").rstrip('/')
