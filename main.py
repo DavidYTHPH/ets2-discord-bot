@@ -82,7 +82,7 @@ def resolve_steam_user(input_string):
         summary_res = requests.get(summary_url, timeout=10).json()
         players = summary_res.get("response", {}).get("players", [])
         if not players:
-            return {"error": "Profile details are hidden, private, or restricted."}
+            return {"error": "Profile details are private or restricted."}
         
         player_data = players[0]
         id_num = int(steam_id_64)
@@ -124,45 +124,42 @@ async def convoyid(interaction: discord.Interaction):
         embed = discord.Embed(title="⚠️ Convoy ID Not Found", description="Server is currently offline or crashing.", color=discord.Color.red())
         await interaction.followup.send(embed=embed)
 
-# --- COMMAND 2: SINGLE UNIFIED DROPDOWN STEAM ID ---
-@bot.tree.command(name="steamid", description="Look up yours or a friend's Steam structural ID profiles.")
-@app_commands.choices(type=[
-    app_commands.Choice(name="👤 Myself", value="me"),
-    app_commands.Choice(name="👥 A Friend", value="friend")
-])
+# --- COMMAND 2: UPGRADED MENTION SEARCH ---
+@bot.tree.command(name="steamid", description="Look up a server member's Steam profiles using tags or custom text.")
 @app_commands.describe(
-    type="Select if you want to look up yourself or an external friend.",
-    friend_identifier="If looking up a friend, type their Steam username, URL, or custom profile text here."
+    target_user="Tag a user in this server (e.g. @looksmaxxing) to search using their active profile name.",
+    text_fallback="Alternatively, paste a raw Steam URL/custom username string here directly."
 )
-async def steamid(interaction: discord.Interaction, type: app_commands.Choice[str], friend_identifier: str = None):
+async def steamid(interaction: discord.Interaction, target_user: discord.Member = None, text_fallback: str = None):
     await interaction.response.defer(ephemeral=False)
     
-    if type.value == "me":
-        # The bot automatically captures their active custom display name or account profile handle
-        steam_target = interaction.user.display_name
+    # 1. Determine what string value to look up
+    if target_user:
+        # Grabs their server nickname first, falls back to their main profile username string
+        steam_target = target_user.display_name
+    elif text_fallback:
+        steam_target = text_fallback
     else:
-        if not friend_identifier:
-            embed = discord.Embed(
-                title="❌ Missing Input Data",
-                description="When selecting the **A Friend** option, you must supply their username or URL inside the `friend_identifier` box prompt!",
-                color=discord.Color.red()
-            )
-            await interaction.followup.send(embed=embed)
-            return
-        steam_target = friend_identifier
+        # Default fallback if they ran it entirely empty: look up the runner!
+        steam_target = interaction.user.display_name
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, resolve_steam_user, steam_target)
     
+    # If using a server nickname failed (due to extra symbols/tags), try their raw system account handle string next!
+    if "error" in result and target_user and steam_target != target_user.name:
+        result = await loop.run_in_executor(None, resolve_steam_user, target_user.name)
+
     if "error" in result:
-        # Fallback check option: If using your display name fails (e.g. they use special emoji characters), try their login username
-        if type.value == "me" and steam_target != interaction.user.name:
-            result_fallback = await loop.run_in_executor(None, resolve_steam_user, interaction.user.name)
-            if "error" not in result_fallback:
-                await interaction.followup.send(embed=build_steam_embed(result_fallback))
-                return
-        
-        await interaction.followup.send(embed=discord.Embed(title="❌ Search Failed", description=result["error"], color=discord.Color.red()))
+        await interaction.followup.send(embed=discord.Embed(
+            title="❌ Profile Lookup Failed", 
+            description=(
+                f"{result['error']}\n\n"
+                f"*Tip: If their Discord profile name doesn't match their exact Steam username structure, "
+                f"simply paste their direct Steam URL link inside the `text_fallback` box option prompt instead!*"
+            ), 
+            color=discord.Color.red()
+        ))
     else:
         await interaction.followup.send(embed=build_steam_embed(result))
 
