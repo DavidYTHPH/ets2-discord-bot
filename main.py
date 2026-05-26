@@ -40,7 +40,7 @@ def save_db(data):
 # --- MUSIC BOT SETTINGS & QUEUE ---
 music_queues = {}
 
-# 🟢 THE HOLY GRAIL BYPASS: Skips webpage/JS rendering entirely to evade 403 blocks.
+# 🟢 THE YOUTUBE MUSIC BYPASS: Uses YouTube Music's backend which has weaker bot protections
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -48,14 +48,16 @@ YTDL_OPTIONS = {
     'ignoreerrors': False,
     'quiet': True,
     'no_warnings': True,
+    'default_search': 'ytmsearch', 
     'source_address': '0.0.0.0',
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'ios'],
-            'player_skip': ['webpage', 'configs', 'js'] # Bypasses the bot-challenge completely!
-        }
-    }
+    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 }
+
+# Since you moved to Amsterdam, your cookies are safe to use again!
+if os.path.exists("cookies.txt"):
+    YTDL_OPTIONS['cookiefile'] = 'cookies.txt'
+elif os.path.exists("www.youtube.com_cookies.txt"):
+    YTDL_OPTIONS['cookiefile'] = 'www.youtube.com_cookies.txt'
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -275,10 +277,14 @@ async def play(interaction: discord.Interaction, search: str):
         except Exception:
             pass
 
+    # 🔴 YOUTUBE MUSIC SEARCH
+    if not clean_search.startswith("http") and not clean_search.startswith("ytmsearch:"):
+        search_query = f"ytmsearch:{clean_search}"
+    else:
+        search_query = clean_search
+
     loop = asyncio.get_event_loop()
     try:
-        # ATTEMPT 1: RAW YOUTUBE SEARCH (Bypassing JS)
-        search_query = f"ytsearch:{clean_search}" if not clean_search.startswith("http") else clean_search
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=False))
         
         if 'entries' in data and len(data['entries']) > 0:
@@ -286,22 +292,20 @@ async def play(interaction: discord.Interaction, search: str):
         else:
             song_info = data
             
-    except Exception as e:
-        print(f"YouTube Failed, falling back to SoundCloud. Reason: {e}")
-        try:
-            # ATTEMPT 2: SOUNDCLOUD SILENT FALLBACK (If YouTube acts up again, it instantly grabs it from SC)
-            fallback_query = f"scsearch:{clean_search.replace('ytsearch:', '')}"
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(fallback_query, download=False))
-            if 'entries' in data and len(data['entries']) > 0:
-                song_info = data['entries'][0]
-            else:
-                song_info = data
-        except Exception as sc_error:
-            await interaction.followup.send(f"❌ **Error finding song.** Both YouTube and SoundCloud blocked the request.")
-            return
+        # We explicitly verify we have a valid, unencrypted audio URL
+        url = song_info.get('url')
+        if not url and 'formats' in song_info:
+            for f in song_info['formats']:
+                if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
+                    url = f.get('url')
+                    break
+            if not url and len(song_info['formats']) > 0:
+                url = song_info['formats'][0].get('url')
 
-    try:
-        song_dict = {'url': song_info['url'], 'title': song_info.get('title', 'Unknown Audio')}
+        if not url:
+            raise Exception("YouTube successfully found the song, but the audio stream URL was locked or hidden.")
+            
+        song_dict = {'url': url, 'title': song_info.get('title', 'Unknown Audio')}
         
         guild_id = interaction.guild.id
         if guild_id not in music_queues:
@@ -316,7 +320,8 @@ async def play(interaction: discord.Interaction, search: str):
             await interaction.followup.send(f"📝 **Added to Queue:** `{song_dict['title']}` (Position: {len(music_queues[guild_id])})")
             
     except Exception as e:
-        await interaction.followup.send(f"❌ **Error processing audio stream.**")
+        error_msg = str(e).replace("`", "'")
+        await interaction.followup.send(f"❌ **Error processing audio stream:**\n`{error_msg[:250]}`")
 
 @bot.tree.command(name="skip", description="[MUSIC] Skip the currently playing song.")
 async def skip(interaction: discord.Interaction):
