@@ -16,16 +16,12 @@ STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 # 🔒 DIRECT LOCK SERVER ID
 GUILD_ID = 1508575872976949411  
 
-# --- MANUAL STEAM LINKING REGISTRY ---
-# Put your numeric Discord User ID here, paired with your Steam username/ID64
-DISCORD_TO_STEAM_MAP = {
-    714243681428144128: "looksmaxxing",  
-}
-
 class ConvoyBot(commands.Bot):
     def __init__(self):
+        # Crucial: We need 'presences' and 'members' flags to check public connections smoothly
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -85,7 +81,7 @@ def resolve_steam_user(input_string):
         summary_res = requests.get(summary_url, timeout=10).json()
         players = summary_res.get("response", {}).get("players", [])
         if not players:
-            return {"error": "Profile details are hidden or restricted."}
+            return {"error": "Profile details are hidden, private, or restricted."}
         
         player_data = players[0]
         id_num = int(steam_id_64)
@@ -117,12 +113,16 @@ def build_steam_embed(result):
 async def on_ready():
     print(f"Bot successfully registered on gateway. Online as: {bot.user}")
     try:
-        # Force overwrite the slash commands to sync with your server immediately
         server_obj = discord.Object(id=GUILD_ID)
+        
+        # 🧹 FIX DUPLICATES: Clear out global entries so they don't double up on your screen!
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync(guild=None)
+        
+        # Force overwrite the commands to sync strictly into your server layout instantly
         bot.tree.copy_global_to(guild=server_obj)
-        print(f"Overwriting local server command tree for Guild: {GUILD_ID}")
         synced = await bot.tree.sync(guild=server_obj)
-        print(f"Direct Server Sync Completed! Active Server Commands: {len(synced)}")
+        print(f"Direct Server Sync Completed! Clean Active Server Commands: {len(synced)}")
     except Exception as e:
         print(f"Failed to sync command tree: {e}")
 
@@ -140,23 +140,40 @@ async def convoyid(interaction: discord.Interaction):
         embed = discord.Embed(title="⚠️ Convoy ID Not Found", description="Server is currently offline or crashing.", color=discord.Color.red())
         await interaction.followup.send(embed=embed)
 
-# --- COMMAND 2: SINGLE UNIFIED STEAM ID COMMAND ---
+# --- COMMAND 2: SINGLE UNIFIED STEAM ID COMMAND WITH DISCORD PROFILE SCRAPING ---
 @bot.tree.command(name="steamid", description="Look up yours or a friend's Steam structural ID profiles.")
-@app_commands.describe(target="Type 'me' for your own profile, or paste a friend's Steam URL/username.")
+@app_commands.describe(target="Type 'me' for your profile connection, or paste a friend's Steam URL/username.")
 async def steamid(interaction: discord.Interaction, target: str):
     await interaction.response.defer(ephemeral=False)
     
     if target.strip().lower() == "me":
-        user_discord_id = interaction.user.id
-        if user_discord_id not in DISCORD_TO_STEAM_MAP:
+        steam_target = None
+        try:
+            # Fetch user profiles with their connection lists included
+            user_profile = await bot.fetch_user_profile(interaction.user.id)
+            for connection in user_profile.connections:
+                if connection.type == "steam":
+                    # We grab their unique 64-bit ID string straight from their Discord account link!
+                    steam_target = connection.id
+                    break
+        except Exception:
+            pass
+            
+        if not steam_target:
             embed = discord.Embed(
-                title="❌ Profile Not Linked", 
-                description=f"Add your Discord ID (`{user_discord_id}`) to `DISCORD_TO_STEAM_MAP` on GitHub.", 
+                title="❌ No Linked Steam Account Found", 
+                description=(
+                    f"I couldn't detect a Steam account linked directly to your Discord profile.\n\n"
+                    f"**How to link it:**\n"
+                    f"1. Open your Discord settings on your PC.\n"
+                    f"2. Go to the **User Settings -> Connections** tab.\n"
+                    f"3. Click the **Steam** icon, sign in, and make sure **'Display on profile'** is toggled on!\n\n"
+                    f"*Alternatively, you can just paste your username directly into the option prompt box!*"
+                ), 
                 color=discord.Color.orange()
             )
             await interaction.followup.send(embed=embed)
             return
-        steam_target = DISCORD_TO_STEAM_MAP[user_discord_id]
     else:
         steam_target = target
 
