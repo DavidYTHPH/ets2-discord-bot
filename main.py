@@ -99,7 +99,6 @@ def build_steam_embed(result):
     embed = discord.Embed(title=f"👤 {result['name']}", color=result["color"])
     embed.set_thumbnail(url=result["avatar"])
     
-    # Build dynamic description based on public privacy settings
     desc = f"**Status:** {result['status']}\n"
     if result.get('realname'):
         desc += f"**Name:** {result['realname']}\n"
@@ -110,7 +109,6 @@ def build_steam_embed(result):
         
     embed.description = desc + "\n"
 
-    # Use code blocks for easy clicking/copying
     embed.add_field(name="🌐 SteamID64", value=f"```\n{result['id64']}\n```", inline=True)
     embed.add_field(name="🆔 SteamID3", value=f"```\n{result['id3']}\n```", inline=True)
     
@@ -226,6 +224,13 @@ async def convoyid(interaction: discord.Interaction):
 @bot.tree.command(name="link", description="Securely log in and link your official Steam account.")
 async def link(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+    
+    # 🛑 CHECK IF ALREADY LINKED
+    db = load_db()
+    if str(interaction.user.id) in db:
+        await interaction.followup.send("✅ You are already verified and securely linked! If you need to change your linked account, please ask a Server Admin to reset your profile.", ephemeral=True)
+        return
+
     base_url = os.getenv("PUBLIC_URL", "").rstrip('/')
     if not base_url:
         await interaction.followup.send("❌ Missing `PUBLIC_URL` variable.", ephemeral=True)
