@@ -40,7 +40,7 @@ def save_db(data):
 # --- MUSIC BOT SETTINGS & QUEUE ---
 music_queues = {}
 
-# 🟢 THE YOUTUBE MUSIC BYPASS: Uses YouTube Music's backend which has weaker bot protections
+# 🟢 BACK TO BASICS: Rock-solid YouTube search + Cookies
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -48,12 +48,12 @@ YTDL_OPTIONS = {
     'ignoreerrors': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytmsearch', 
+    'default_search': 'ytsearch', 
     'source_address': '0.0.0.0',
     'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 }
 
-# Since you moved to Amsterdam, your cookies are safe to use again!
+# Automatically load the cookies to bypass bot protections
 if os.path.exists("cookies.txt"):
     YTDL_OPTIONS['cookiefile'] = 'cookies.txt'
 elif os.path.exists("www.youtube.com_cookies.txt"):
@@ -277,9 +277,9 @@ async def play(interaction: discord.Interaction, search: str):
         except Exception:
             pass
 
-    # 🔴 YOUTUBE MUSIC SEARCH
-    if not clean_search.startswith("http") and not clean_search.startswith("ytmsearch:"):
-        search_query = f"ytmsearch:{clean_search}"
+    # 🔴 YOUTUBE SEARCH
+    if not clean_search.startswith("http") and not clean_search.startswith("ytsearch:"):
+        search_query = f"ytsearch:{clean_search}"
     else:
         search_query = clean_search
 
@@ -292,7 +292,6 @@ async def play(interaction: discord.Interaction, search: str):
         else:
             song_info = data
             
-        # We explicitly verify we have a valid, unencrypted audio URL
         url = song_info.get('url')
         if not url and 'formats' in song_info:
             for f in song_info['formats']:
