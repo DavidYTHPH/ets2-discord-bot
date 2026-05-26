@@ -13,11 +13,13 @@ LOGS_URL = "https://de4.assettohosting.com:60081/logs"
 PANEL_COOKIE = os.getenv("PANEL_COOKIE")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
+# 🔒 DIRECT LOCK SERVER ID
+GUILD_ID = 1508575872976949411  
+
 # --- MANUAL STEAM LINKING REGISTRY ---
 # Put your numeric Discord User ID here, paired with your Steam username/ID64
-# so the bot instantly knows who you are when you choose "me".
 DISCORD_TO_STEAM_MAP = {
-    714243681428144128: "looksmaxxing",  # Example entry: replace with your actual ID if needed
+    714243681428144128: "looksmaxxing",  
 }
 
 class ConvoyBot(commands.Bot):
@@ -115,9 +117,12 @@ def build_steam_embed(result):
 async def on_ready():
     print(f"Bot successfully registered on gateway. Online as: {bot.user}")
     try:
-        print("Syncing slash command tree...")
-        synced = await bot.tree.sync()
-        print(f"Successfully synced {len(synced)} slash command(s).")
+        # Force overwrite the slash commands to sync with your server immediately
+        server_obj = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=server_obj)
+        print(f"Overwriting local server command tree for Guild: {GUILD_ID}")
+        synced = await bot.tree.sync(guild=server_obj)
+        print(f"Direct Server Sync Completed! Active Server Commands: {len(synced)}")
     except Exception as e:
         print(f"Failed to sync command tree: {e}")
 
@@ -141,24 +146,18 @@ async def convoyid(interaction: discord.Interaction):
 async def steamid(interaction: discord.Interaction, target: str):
     await interaction.response.defer(ephemeral=False)
     
-    # Check if user wants their own logged profile info
     if target.strip().lower() == "me":
         user_discord_id = interaction.user.id
         if user_discord_id not in DISCORD_TO_STEAM_MAP:
             embed = discord.Embed(
                 title="❌ Profile Not Linked", 
-                description=(
-                    f"Your personal Discord account isn't mapped inside the code yet!\n\n"
-                    f"**To link yourself:** Open `main.py` on GitHub and add your Discord ID (`{user_discord_id}`) "
-                    f"to the `DISCORD_TO_STEAM_MAP` list near the top."
-                ), 
+                description=f"Add your Discord ID (`{user_discord_id}`) to `DISCORD_TO_STEAM_MAP` on GitHub.", 
                 color=discord.Color.orange()
             )
             await interaction.followup.send(embed=embed)
             return
         steam_target = DISCORD_TO_STEAM_MAP[user_discord_id]
     else:
-        # Otherwise, treat the input as a friend's custom string link
         steam_target = target
 
     loop = asyncio.get_event_loop()
@@ -184,10 +183,6 @@ async def check_server_id():
         last_known_id = current_id
         has_posted_initial = True
         embed = discord.Embed(title="🚚 Euro Truck Simulator 2 Server Online!", description=f"**Search ID:** `{current_id}`", color=discord.Color.green())
-        await channel.send(embed=embed)
-    elif not current_id and not has_posted_initial:
-        has_posted_initial = True
-        embed = discord.Embed(title="🚚 ETS2 Lobby Monitor Connected", description="The bot is online and waiting for your server hosting node memory to clear!", color=discord.Color.blue())
         await channel.send(embed=embed)
 
 bot.run(TOKEN)
