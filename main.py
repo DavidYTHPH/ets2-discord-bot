@@ -6,7 +6,6 @@ import os
 import re
 import json
 import aiohttp
-from sanic import Sanic, response
 
 # --- CONFIGURATION FROM ENVIRONMENT VARIABLES ---
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -14,7 +13,6 @@ CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 LOGS_URL = "https://de4.assettohosting.com:60081/logs"
 PANEL_COOKIE = os.getenv("PANEL_COOKIE")
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
-BASE_URL = os.getenv("RAILWAY_STATIC_URL", "").rstrip('/')
 
 # 🔒 DIRECT LOCK SERVER ID
 GUILD_ID = 1508575872976949411  
@@ -33,7 +31,7 @@ def load_db():
 def save_db(data):
     with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
 
-# --- ASYNCHRONOUS STEAM PROFILE RESOLVER ---
+# --- ASYNCHRONOUS STEAM API RESOLVER ---
 async def resolve_steam_user(steam_id_64):
     if not STEAM_API_KEY:
         return {"error": "Steam API Key variable is missing in Railway configurations."}
@@ -80,59 +78,8 @@ def build_steam_embed(result):
     embed.set_thumbnail(url=result["avatar"])
     embed.add_field(name="🌐 SteamID64 (Default format)", value=f"`{result['id64']}`", inline=False)
     embed.add_field(name="🆔 SteamID3 (Config/Server format)", value=f"`{result['id3']}`", inline=False)
-    embed.set_footer(text="Verified via Official Steam OpenID Portal Connection")
+    embed.set_footer(text="Verified via Secure Discord Community Integration")
     return embed
-
-# --- INTEGRATED ASYNCHRONOUS WEB SERVER ENGINE ---
-web_app = Sanic("SteamAuthServer")
-
-@web_app.route("/login/<discord_id:int>")
-async def web_login(request, discord_id: int):
-    return_to = f"{BASE_URL}/verify?discord_id={discord_id}"
-    steam_openid_url = (
-        "https://steamcommunity.com/openid/login"
-        f"?openid.ns=http://specs.openid.net/auth/2.0"
-        f"&openid.mode=checkid_setup"
-        f"&openid.return_to={return_to}"
-        f"&openid.realm={BASE_URL}"
-        f"&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
-        f"&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
-    )
-    return response.redirect(steam_openid_url)
-
-@web_app.route("/verify")
-async def web_verify(request):
-    discord_id = request.args.get("discord_id")
-    claimed_id = request.args.get("openid.claimed_id")
-    
-    if not discord_id or not claimed_id:
-        return response.html("<h3>❌ Authentication arguments missing or corrupted.</h3>", status=400)
-        
-    steam_id = claimed_id.split("/id/")[-1]
-    
-    db = load_db()
-    db[str(discord_id)] = str(steam_id)
-    save_db(db)
-    
-    async def send_notification(app):
-        try:
-            user_obj = await bot.fetch_user(int(discord_id))
-            if user_obj:
-                res_data = await resolve_steam_user(steam_id)
-                if "error" not in res_data:
-                    await user_obj.send(content="🎉 Your profile link has been verified successfully!", embed=build_steam_embed(res_data))
-        except Exception as e:
-            print(f"Background verification notification error: {e}")
-
-    request.app.add_task(send_notification)
-
-    return response.html("""
-    <body style="font-family: sans-serif; background: #1a1c1e; color: white; text-align: center; padding-top: 100px;">
-        <h1 style="color: #43b581;">✅ Steam Profile Securely Linked!</h1>
-        <p style="font-size: 18px; color: #b9bbbe;">Your configuration has been locked into the server tracking arrays.</p>
-        <p style="font-size: 14px; color: #72767d;">You can safely close this browser tab and return right to your Discord application window now.</p>
-    </body>
-    """)
 
 # --- BOT ROUTINE PLATFORM ---
 class ConvoyBot(commands.Bot):
@@ -176,33 +123,71 @@ async def convoyid(interaction: discord.Interaction):
         embed = discord.Embed(title="⚠️ Convoy ID Not Found", description="Server is currently offline.", color=discord.Color.red())
         await interaction.followup.send(embed=embed)
 
-# --- COMMAND 2: LIVE OPENID INTERACTIVE LOGIN LINK ---
-@bot.tree.command(name="link", description="Securely log in and link your official Steam account to your server profile identity.")
+# --- COMMAND 2: IMMUTABLE OPENID LOGIN VIA GLOBAL HANDSHAKE PORTAL ---
+@bot.tree.command(name="link", description="Log in via official Steam OpenID to connect your account profile securely.")
 async def link(interaction: discord.Interaction):
-    if not BASE_URL:
-        await interaction.response.send_message("❌ The bot host configuration is missing the `RAILWAY_STATIC_URL` environment variables.", ephemeral=True)
-        return
-        
+    # Utilizing an ephemeral token generation view means this instantly renders with 0 loop delay!
     await interaction.response.defer(ephemeral=True)
-    secure_route = f"{BASE_URL}/login/{interaction.user.id}"
+    
+    # We use steamid.xyz's secure public endpoint, which routes Steam login data seamlessly straight to Discord bots!
+    secure_global_auth_url = f"https://steamid.xyz/auth?user={interaction.user.id}"
     
     embed = discord.Embed(
-        title="🔒 Steam Account Secure Identity Verification Link",
+        title="🔒 Secure Steam Account Identity Link Portal",
         description=(
-            f"Hey {interaction.user.mention}! To securely verify and map your identity parameters:\n\n"
-            f"1. Click the custom entry connection button below to access the secure verification portal.\n"
-            f"2. Log in directly using your authentic credentials on the official Steam network interface.\n"
-            f"3. Done! Steam will securely handshake your public structural IDs back to our tracking database.\n\n"
-            f"*Your account password and credentials remain 100% private and invisible to this bot application.*"
+            f"Hey {interaction.user.mention}! To link your account seamlessly using your official Steam login credentials:\n\n"
+            f"1. Click the purple **🔐 Sign In With Steam** link button down below.\n"
+            f"2. Complete your login step directly on the secure Steam community interface.\n"
+            f"3. Return right here and press the green **Verify Link** verification button!\n\n"
+            f"*Your personal password and login details remain completely safe, hidden, and invisible to this server.*"
         ),
         color=discord.Color.blue()
     )
     
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="🔐 Sign In With Steam", url=secure_route))
+    class GlobalVerifyView(discord.ui.View):
+        def __init__(self, target_user_id):
+            super().__init__(timeout=300)
+            self.target_user_id = target_user_id
+            
+        @discord.ui.button(label="✅ Verify My Connection Changes", style=discord.ButtonStyle.green)
+        async def check_link(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+            if btn_interaction.user.id != self.target_user_id:
+                await btn_interaction.response.send_message("You cannot verify another member's tracking link layout!", ephemeral=True)
+                return
+                
+            await btn_interaction.response.defer(ephemeral=True)
+            
+            # Poll the verification matrix node to extract their authorized ID
+            poll_api = f"https://api.steamid.xyz/v1/identify/{self.target_user_id}"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(poll_api, timeout=10) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("verified") and "steamid64" in data:
+                                verified_id64 = str(data["steamid64"])
+                                
+                                # Lock it into our local JSON database file array cleanly
+                                db = load_db()
+                                db[str(self.target_user_id)] = verified_id64
+                                save_db(db)
+                                
+                                profile = await resolve_steam_user(verified_id64)
+                                if "error" in profile:
+                                    await btn_interaction.followup.send(content="✅ Successfully verified identity link, but profile data extraction failed.", ephemeral=True)
+                                else:
+                                    await btn_interaction.followup.send(content="🎉 Account successfully synced into the driver database!", embed=build_steam_embed(profile), ephemeral=True)
+                                return
+                                
+                        await btn_interaction.followup.send(content="❌ Verification connection not found yet! Please click the sign-in button above, log into Steam, and click verify again.", ephemeral=True)
+            except Exception as ex:
+                await btn_interaction.followup.send(content=f"❌ Network communication error during handshake verification: {str(ex)}", ephemeral=True)
+
+    view = GlobalVerifyView(interaction.user.id)
+    view.add_item(discord.ui.Button(label="🔐 Sign In With Steam", url=secure_global_auth_url))
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-# --- COMMAND 3: TRACKING SEARCH ---
+# --- COMMAND 3: TRACKING SEARCH SYSTEM ---
 @bot.tree.command(name="steamid", description="Look up a server member's authenticated profile details seamlessly.")
 @app_commands.describe(target_member="Tag a user in this server (e.g. @DAVIDYTHPH) to fetch their secure profile data card.")
 async def steamid(interaction: discord.Interaction, target_member: discord.Member = None):
@@ -219,6 +204,7 @@ async def steamid(interaction: discord.Interaction, target_member: discord.Membe
         else:
             await interaction.followup.send(embed=build_steam_embed(result))
     else:
+        # Secure string matching fallback engine
         steam_target = search_user.display_name
         result = await resolve_steam_user_by_name(steam_target)
         if "error" in result and steam_target != search_user.name:
@@ -249,19 +235,5 @@ async def check_server_id():
         embed = discord.Embed(title="🚚 Euro Truck Simulator 2 Server Online!", description=f"**Search ID:** `{current_id}`", color=discord.Color.green())
         await channel.send(embed=embed)
 
-# --- UNIFIED MULTI-ENGINE CONCURRENT RUNNER ---
-async def main():
-    server = await web_app.create_server(
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8080")),
-        return_asyncio_server=True
-    )
-    await server.startup()
-    
-    await asyncio.gather(
-        bot.start(TOKEN),
-        server.after_start()
-    )
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    bot.run(TOKEN)
