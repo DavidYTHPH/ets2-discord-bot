@@ -192,7 +192,6 @@ async def steamid(interaction: discord.Interaction, target_member: discord.Membe
     if steam_target and str(steam_target).isdigit() and len(str(steam_target)) == 17:
         result = await loop.run_in_executor(None, resolve_steam_user, steam_target)
     else:
-        from main import resolve_steam_user_by_name
         result = await loop.run_in_executor(None, resolve_steam_user_by_name, steam_target)
         if "error" in result and target_member and steam_target != target_member.name:
             result = await loop.run_in_executor(None, resolve_steam_user_by_name, target_member.name)
