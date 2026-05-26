@@ -20,8 +20,13 @@ STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 GUILD_ID = 1508575872976949411  
 SERVER_OBJ = discord.Object(id=GUILD_ID)
 
-# --- LOCAL STORAGE DATABASE ---
-DB_FILE = "users.json"
+# --- LOCAL STORAGE DATABASE (NOW PERSISTENT) ---
+# This checks if you added the Railway Volume. If yes, it saves it there permanently!
+DB_DIR = "/app/data"
+if os.path.exists(DB_DIR):
+    DB_FILE = os.path.join(DB_DIR, "users.json")
+else:
+    DB_FILE = "users.json"
 
 def load_db():
     if os.path.exists(DB_FILE):
@@ -43,7 +48,7 @@ YTDL_OPTIONS = {
     'ignoreerrors': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'auto',
+    'default_search': 'scsearch', # Bypasses YouTube IP bans!
     'source_address': '0.0.0.0'
 }
 
@@ -59,7 +64,6 @@ def play_next(guild_id, vc):
         song = music_queues[guild_id].pop(0)
         vc.play(discord.FFmpegPCMAudio(song['url'], **FFMPEG_OPTIONS), after=lambda e: play_next(guild_id, vc))
     else:
-        # If queue is empty, safely disconnect
         if vc and vc.is_connected():
             asyncio.run_coroutine_threadsafe(vc.disconnect(), bot.loop)
 
@@ -200,7 +204,7 @@ class ConvoyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        intents.voice_states = True # Required for music
+        intents.voice_states = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -240,7 +244,7 @@ async def fetch_convoy_id():
 
 # --- 🎵 MUSIC COMMANDS ---
 @bot.tree.command(name="play", description="[MUSIC] Search and play a song in your voice channel.")
-@app_commands.describe(search="The song name or YouTube link")
+@app_commands.describe(search="The song name")
 async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer(ephemeral=False)
     
@@ -252,10 +256,15 @@ async def play(interaction: discord.Interaction, search: str):
     if not vc:
         vc = await interaction.user.voice.channel.connect()
         
-    # Run the YT search in a background thread so the bot doesn't freeze
     loop = asyncio.get_event_loop()
     try:
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{search}", download=False))
+        # We explicitly force the search to SoundCloud to completely bypass the YouTube IP ban!
+        if not search.startswith("http"):
+            search_query = f"scsearch:{search}"
+        else:
+            search_query = search
+            
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=False))
         if 'entries' in data and len(data['entries']) > 0:
             song_info = data['entries'][0]
         else:
@@ -276,13 +285,13 @@ async def play(interaction: discord.Interaction, search: str):
             await interaction.followup.send(f"📝 **Added to Queue:** `{song_dict['title']}` (Position: {len(music_queues[guild_id])})")
             
     except Exception as e:
-        await interaction.followup.send(f"❌ Error playing song. YouTube might be blocking the connection.")
+        await interaction.followup.send(f"❌ Error finding song. Please try a different track name.")
 
 @bot.tree.command(name="skip", description="[MUSIC] Skip the currently playing song.")
 async def skip(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
     if vc and vc.is_playing():
-        vc.stop() # Stopping triggers the 'after' callback to play next
+        vc.stop() 
         await interaction.response.send_message("⏭️ **Skipped!**")
     else:
         await interaction.response.send_message("❌ Nothing is currently playing.", ephemeral=True)
@@ -312,7 +321,7 @@ async def queue(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("📂 The queue is currently empty.")
 
-# --- UTILITY COMMANDS (Steam/ETS2) ---
+# --- UTILITY COMMANDS ---
 @bot.tree.command(name="convoyid", description="Fetch the current live ETS2 Convoy Search ID.")
 async def convoyid(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
@@ -350,8 +359,8 @@ async def link(interaction: discord.Interaction):
 
 @bot.tree.command(name="steamid", description="Look up a server member's profile.")
 @app_commands.describe(
-    target_member="Tag a user in this server to fetch their secure profile data.",
-    manual_search="Alternatively, paste a custom text username or direct Steam URL link here."
+    target_member="Tag a user to fetch their secure profile data.",
+    manual_search="Alternatively, paste a custom text username or direct URL link here."
 )
 async def steamid(interaction: discord.Interaction, target_member: discord.Member = None, manual_search: str = None):
     await interaction.response.defer(ephemeral=False)
@@ -380,9 +389,8 @@ async def steamid(interaction: discord.Interaction, target_member: discord.Membe
     else:
         await interaction.followup.send(embed=build_steam_embed(result), view=SteamProfileView(result["url"]))
 
-# --- ADMIN RESTRICTED COMMANDS ---
+# --- ADMIN COMMANDS ---
 @bot.tree.command(name="admin_forcelink", description="[ADMIN] Force link a user to a specific Steam ID.")
-@app_commands.describe(target="The Discord user", steam_id="Their 17-digit SteamID64")
 @app_commands.default_permissions(administrator=True)
 async def admin_forcelink(interaction: discord.Interaction, target: discord.Member, steam_id: str):
     if not steam_id.isdigit() or len(steam_id) != 17:
