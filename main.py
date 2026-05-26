@@ -50,12 +50,22 @@ async def resolve_steam_user(steam_id_64):
                 id_num = int(steam_id_64)
                 steam_id_3 = f"[U:1:{id_num - 76561197960265728}]"
                 
+                # --- MODERNIZED DATA EXTRACTION ---
+                personastate = player_data.get("personastate", 0)
+                state_colors = {0: 0x747f8d, 1: 0x43b581, 2: 0xf04747, 3: 0xfaa61a, 4: 0xfaa61a, 5: 0x43b581, 6: 0x43b581}
+                state_text = {0: "⚫ Offline", 1: "🟢 Online", 2: "🔴 Busy", 3: "🟡 Away", 4: "🌙 Snooze", 5: "📦 Looking to Trade", 6: "🎮 Looking to Play"}
+                
                 return {
                     "name": player_data.get("personaname", "Unknown User"),
                     "url": player_data.get("profileurl", ""),
                     "avatar": player_data.get("avatarfull", ""),
                     "id64": str(steam_id_64),
-                    "id3": steam_id_3
+                    "id3": steam_id_3,
+                    "status": state_text.get(personastate, "⚫ Offline"),
+                    "color": state_colors.get(personastate, 0x3498db),
+                    "realname": player_data.get("realname"),
+                    "country": player_data.get("loccountrycode"),
+                    "timecreated": player_data.get("timecreated")
                 }
     except Exception as e:
         return {"error": f"Error processing Steam details: {str(e)}"}
@@ -84,15 +94,35 @@ async def resolve_steam_user_by_name(name_string):
     except:
         return {"error": "Failed to connect to Steam database servers."}
 
+# --- MODERNIZED UI BUILDERS ---
 def build_steam_embed(result):
-    embed = discord.Embed(title=f"👤 Steam Account: {result['name']}", url=result["url"], color=discord.Color.blue())
+    embed = discord.Embed(title=f"👤 {result['name']}", color=result["color"])
     embed.set_thumbnail(url=result["avatar"])
-    embed.add_field(name="🌐 SteamID64 (Default format)", value=f"`{result['id64']}`", inline=False)
-    embed.add_field(name="🆔 SteamID3 (Config/Server format)", value=f"`{result['id3']}`", inline=False)
-    embed.set_footer(text="Verified via Official Server Integration")
+    
+    # Build dynamic description based on public privacy settings
+    desc = f"**Status:** {result['status']}\n"
+    if result.get('realname'):
+        desc += f"**Name:** {result['realname']}\n"
+    if result.get('country'):
+        desc += f"**Region:** :flag_{result['country'].lower()}:\n"
+    if result.get('timecreated'):
+        desc += f"**Joined Steam:** <t:{result['timecreated']}:R>\n"
+        
+    embed.description = desc + "\n"
+
+    # Use code blocks for easy clicking/copying
+    embed.add_field(name="🌐 SteamID64", value=f"```\n{result['id64']}\n```", inline=True)
+    embed.add_field(name="🆔 SteamID3", value=f"```\n{result['id3']}\n```", inline=True)
+    
+    embed.set_footer(text="Verified via Native Server Integration", icon_url="https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Steam_icon_logo.svg/512px-Steam_icon_logo.svg.png")
     return embed
 
-# --- NATIVE WEB SERVER ROUTES (Runs seamlessly with Discord) ---
+class SteamProfileView(discord.ui.View):
+    def __init__(self, url):
+        super().__init__()
+        self.add_item(discord.ui.Button(label="View Steam Profile", url=url, style=discord.ButtonStyle.link, emoji="🔗"))
+
+# --- NATIVE WEB SERVER ROUTES ---
 async def web_login(request):
     discord_id = request.match_info.get('discord_id')
     base_url = os.getenv("PUBLIC_URL", "").rstrip('/')
@@ -122,15 +152,14 @@ async def web_verify(request):
     db[str(discord_id)] = str(steam_id)
     save_db(db)
     
-    # Try sending a DM to the user to confirm
     try:
         user_obj = await bot.fetch_user(int(discord_id))
         if user_obj:
             res_data = await resolve_steam_user(steam_id)
             if "error" not in res_data:
-                await user_obj.send(content="🎉 Your Steam account has been securely linked!", embed=build_steam_embed(res_data))
-    except Exception as e:
-        print(f"DM Failed: {e}")
+                await user_obj.send(content="🎉 Your Steam account has been securely linked to the server!", embed=build_steam_embed(res_data), view=SteamProfileView(res_data["url"]))
+    except Exception:
+        pass
 
     html_content = """
     <body style="font-family: sans-serif; background: #1a1c1e; color: white; text-align: center; padding-top: 100px;">
@@ -143,18 +172,17 @@ async def web_verify(request):
 # --- BOT ROUTINE PLATFORM ---
 class ConvoyBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.default())
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # 1. Sync Discord Commands
         self.tree.copy_global_to(guild=SERVER_OBJ)
         await self.tree.sync(guild=SERVER_OBJ)
         
-        # 2. Start Background Loop
         if not check_server_id.is_running():
             check_server_id.start()
             
-        # 3. Start Native Web Server inside Discord's event loop
         app = web.Application()
         app.add_routes([
             web.get('/login/{discord_id}', web_login),
@@ -165,7 +193,6 @@ class ConvoyBot(commands.Bot):
         port = int(os.getenv("PORT", "8080"))
         site = web.TCPSite(runner, '0.0.0.0', port)
         await site.start()
-        print(f"Native Auth Server running on port {port}")
 
 bot = ConvoyBot()
 last_known_id = None
@@ -184,7 +211,7 @@ async def fetch_convoy_id():
                 return None
     except: return None
 
-# --- COMMAND 1: CONVOY FETCH ---
+# --- PUBLIC COMMANDS ---
 @bot.tree.command(name="convoyid", description="Fetch the current live ETS2 Convoy Search ID.")
 async def convoyid(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
@@ -196,33 +223,25 @@ async def convoyid(interaction: discord.Interaction):
         embed = discord.Embed(title="⚠️ Convoy ID Not Found", description="Server is currently offline.", color=discord.Color.red())
         await interaction.followup.send(embed=embed)
 
-# --- COMMAND 2: SECURE LINK PORTAL ---
 @bot.tree.command(name="link", description="Securely log in and link your official Steam account.")
 async def link(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     base_url = os.getenv("PUBLIC_URL", "").rstrip('/')
     if not base_url:
-        await interaction.response.send_message("❌ The bot host configuration is missing the `PUBLIC_URL` variable.", ephemeral=True)
+        await interaction.followup.send("❌ Missing `PUBLIC_URL` variable.", ephemeral=True)
         return
         
     secure_route = f"{base_url}/login/{interaction.user.id}"
-    
     embed = discord.Embed(
         title="🔒 Steam Account Identity Link",
-        description=(
-            f"Hey {interaction.user.mention}! To link your account natively:\n\n"
-            f"1. Click the **🔐 Sign In With Steam** button below.\n"
-            f"2. Complete your login directly on Steam.\n"
-            f"3. You will instantly get a DM confirming you are linked!\n\n"
-            f"*Your account password remains completely safe and invisible to this server.*"
-        ),
-        color=discord.Color.blue()
+        description=(f"Hey {interaction.user.mention}! Click the button below to sign in directly via Steam. "
+                     f"Your credentials remain 100% hidden and secure."),
+        color=discord.Color.blurple()
     )
-    
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="🔐 Sign In With Steam", url=secure_route))
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-# --- COMMAND 3: TRACKING SEARCH SYSTEM ---
 @bot.tree.command(name="steamid", description="Look up a server member's profile.")
 @app_commands.describe(
     target_member="Tag a user in this server to fetch their secure profile data.",
@@ -249,13 +268,47 @@ async def steamid(interaction: discord.Interaction, target_member: discord.Membe
     if "error" in result:
         await interaction.followup.send(embed=discord.Embed(
             title="⚠️ Profile Not Found",
-            description=(f"I could not automatically resolve that user.\n\n"
-                         f"💡 **The Fix:** Have them use `/link` to log in, OR paste their Steam URL into the `manual_search` option!"),
+            description=f"Could not automatically resolve that user.\n💡 Have them use `/link` to log in, OR paste their URL into `manual_search`!",
             color=discord.Color.orange()
         ))
     else:
-        await interaction.followup.send(embed=build_steam_embed(result))
+        await interaction.followup.send(embed=build_steam_embed(result), view=SteamProfileView(result["url"]))
 
+# --- ADMIN RESTRICTED COMMANDS ---
+@bot.tree.command(name="admin_forcelink", description="[ADMIN] Force link a user to a specific Steam ID.")
+@app_commands.describe(target="The Discord user", steam_id="Their 17-digit SteamID64")
+@app_commands.default_permissions(administrator=True)
+async def admin_forcelink(interaction: discord.Interaction, target: discord.Member, steam_id: str):
+    if not steam_id.isdigit() or len(steam_id) != 17:
+        await interaction.response.send_message("❌ Invalid Steam ID. It must be the raw 17-digit SteamID64.", ephemeral=True)
+        return
+        
+    db = load_db()
+    db[str(target.id)] = steam_id
+    save_db(db)
+    await interaction.response.send_message(f"✅ Successfully force-linked {target.mention} to SteamID: `{steam_id}`", ephemeral=True)
+
+@bot.tree.command(name="admin_unlink", description="[ADMIN] Wipe a user's Steam profile from the database.")
+@app_commands.default_permissions(administrator=True)
+async def admin_unlink(interaction: discord.Interaction, target: discord.Member):
+    db = load_db()
+    user_key = str(target.id)
+    if user_key in db:
+        del db[user_key]
+        save_db(db)
+        await interaction.response.send_message(f"🗑️ Successfully unlinked and wiped data for {target.mention}.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ {target.mention} is not currently linked in the database.", ephemeral=True)
+
+@bot.tree.command(name="admin_stats", description="[ADMIN] View database driver verification statistics.")
+@app_commands.default_permissions(administrator=True)
+async def admin_stats(interaction: discord.Interaction):
+    db = load_db()
+    count = len(db)
+    embed = discord.Embed(title="📊 Server Tracking Database", description=f"Total Verified Drivers Linked: **{count}**", color=discord.Color.blurple())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# --- BACKGROUND TASKS ---
 @tasks.loop(seconds=60)
 async def check_server_id():
     global last_known_id
