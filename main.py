@@ -20,8 +20,7 @@ STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 GUILD_ID = 1508575872976949411  
 SERVER_OBJ = discord.Object(id=GUILD_ID)
 
-# --- LOCAL STORAGE DATABASE (NOW PERSISTENT) ---
-# This checks if you added the Railway Volume. If yes, it saves it there permanently!
+# --- LOCAL STORAGE DATABASE (PERSISTENT) ---
 DB_DIR = "/app/data"
 if os.path.exists(DB_DIR):
     DB_FILE = os.path.join(DB_DIR, "users.json")
@@ -41,6 +40,7 @@ def save_db(data):
 # --- MUSIC BOT SETTINGS & QUEUE ---
 music_queues = {}
 
+# Spoofed headers to bypass YouTube blocking Railway's IP
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -48,13 +48,15 @@ YTDL_OPTIONS = {
     'ignoreerrors': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'scsearch', # Bypasses YouTube IP bans!
-    'source_address': '0.0.0.0'
+    'default_search': 'ytsearch',
+    'source_address': '0.0.0.0',
+    'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 }
 
+# Fixes 403 Forbidden errors when streaming long songs
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
+    'options': '-vn -sn'
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
@@ -243,8 +245,8 @@ async def fetch_convoy_id():
     except: return None
 
 # --- 🎵 MUSIC COMMANDS ---
-@bot.tree.command(name="play", description="[MUSIC] Search and play a song in your voice channel.")
-@app_commands.describe(search="The song name")
+@bot.tree.command(name="play", description="[MUSIC] Play a song from YouTube or Spotify.")
+@app_commands.describe(search="The song name, YouTube link, or Spotify link")
 async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer(ephemeral=False)
     
@@ -255,16 +257,31 @@ async def play(interaction: discord.Interaction, search: str):
     vc = interaction.guild.voice_client
     if not vc:
         vc = await interaction.user.voice.channel.connect()
-        
+
+    # 🟢 SPOTIFY BYPASS: Converts Spotify track links to raw search queries automatically!
+    if "spotify.com" in search:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://open.spotify.com/oembed?url={search}") as resp:
+                    if resp.status == 200:
+                        sp_data = await resp.json()
+                        search = f"{sp_data.get('title')} {sp_data.get('author_name')}"
+                    else:
+                        await interaction.followup.send("❌ Could not read that Spotify link. Try typing the song name instead.")
+                        return
+        except Exception:
+            pass # If API fails, just try searching the raw link anyway
+
+    # 🔴 YOUTUBE SEARCH
+    if not search.startswith("http"):
+        search_query = f"ytsearch:{search}"
+    else:
+        search_query = search
+
     loop = asyncio.get_event_loop()
     try:
-        # We explicitly force the search to SoundCloud to completely bypass the YouTube IP ban!
-        if not search.startswith("http"):
-            search_query = f"scsearch:{search}"
-        else:
-            search_query = search
-            
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=False))
+        
         if 'entries' in data and len(data['entries']) > 0:
             song_info = data['entries'][0]
         else:
@@ -285,7 +302,8 @@ async def play(interaction: discord.Interaction, search: str):
             await interaction.followup.send(f"📝 **Added to Queue:** `{song_dict['title']}` (Position: {len(music_queues[guild_id])})")
             
     except Exception as e:
-        await interaction.followup.send(f"❌ Error finding song. Please try a different track name.")
+        print(f"YTDL ERROR: {str(e)}") # This will print the exact reason to your Railway deploy logs!
+        await interaction.followup.send(f"❌ **Error finding song.** YouTube might be temporarily blocking the connection. Try a direct link instead.")
 
 @bot.tree.command(name="skip", description="[MUSIC] Skip the currently playing song.")
 async def skip(interaction: discord.Interaction):
