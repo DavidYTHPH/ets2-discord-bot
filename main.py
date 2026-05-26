@@ -6,6 +6,7 @@ import os
 import re
 import json
 import aiohttp
+from aiohttp import web
 
 # --- CONFIGURATION FROM ENVIRONMENT VARIABLES ---
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -34,7 +35,7 @@ def save_db(data):
 # --- ASYNCHRONOUS STEAM API RESOLVER ---
 async def resolve_steam_user(steam_id_64):
     if not STEAM_API_KEY:
-        return {"error": "Steam API Key variable is missing in Railway configurations."}
+        return {"error": "Steam API Key variable is missing."}
     summary_url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={STEAM_API_KEY}&steamids={steam_id_64}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -57,11 +58,21 @@ async def resolve_steam_user(steam_id_64):
                     "id3": steam_id_3
                 }
     except Exception as e:
-        return {"error": f"Error processing Steam profile details: {str(e)}"}
+        return {"error": f"Error processing Steam details: {str(e)}"}
 
 async def resolve_steam_user_by_name(name_string):
     if not STEAM_API_KEY: return {"error": "Steam Key Missing."}
-    resolve_url = f"https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={STEAM_API_KEY}&vanityurl={name_string}"
+    
+    clean_input = str(name_string).strip().rstrip('/')
+    if "steamcommunity.com/id/" in clean_input:
+        clean_input = clean_input.split("/id/")[-1]
+    elif "steamcommunity.com/profiles/" in clean_input:
+        clean_input = clean_input.split("/profiles/")[-1]
+
+    if re.match(r"^\d{17}$", clean_input):
+        return await resolve_steam_user(clean_input)
+
+    resolve_url = f"https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={STEAM_API_KEY}&vanityurl={clean_input}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(resolve_url, timeout=10) as resp:
@@ -69,7 +80,7 @@ async def resolve_steam_user_by_name(name_string):
                 data = await resp.json()
                 if data.get("response", {}).get("success") == 1:
                     return await resolve_steam_user(data["response"]["steamid"])
-                return {"error": f"Could not find a matching public Steam profile for string name: `{name_string}`."}
+                return {"error": f"Could not find a matching public Steam profile for: `{name_string}`."}
     except:
         return {"error": "Failed to connect to Steam database servers."}
 
@@ -78,21 +89,83 @@ def build_steam_embed(result):
     embed.set_thumbnail(url=result["avatar"])
     embed.add_field(name="🌐 SteamID64 (Default format)", value=f"`{result['id64']}`", inline=False)
     embed.add_field(name="🆔 SteamID3 (Config/Server format)", value=f"`{result['id3']}`", inline=False)
-    embed.set_footer(text="Verified via Secure Discord Community Integration")
+    embed.set_footer(text="Verified via Official Server Integration")
     return embed
+
+# --- NATIVE WEB SERVER ROUTES (Runs seamlessly with Discord) ---
+async def web_login(request):
+    discord_id = request.match_info.get('discord_id')
+    base_url = os.getenv("PUBLIC_URL", "").rstrip('/')
+    
+    return_to = f"{base_url}/verify?discord_id={discord_id}"
+    steam_openid_url = (
+        "https://steamcommunity.com/openid/login"
+        "?openid.ns=http://specs.openid.net/auth/2.0"
+        "&openid.mode=checkid_setup"
+        f"&openid.return_to={return_to}"
+        f"&openid.realm={base_url}"
+        "&openid.identity=http://specs.openid.net/auth/2.0/identifier_select"
+        "&openid.claimed_id=http://specs.openid.net/auth/2.0/identifier_select"
+    )
+    raise web.HTTPFound(steam_openid_url)
+
+async def web_verify(request):
+    discord_id = request.query.get("discord_id")
+    claimed_id = request.query.get("openid.claimed_id")
+    
+    if not discord_id or not claimed_id:
+        return web.Response(text="❌ Authentication arguments missing.", status=400)
+        
+    steam_id = claimed_id.split("/id/")[-1]
+    
+    db = load_db()
+    db[str(discord_id)] = str(steam_id)
+    save_db(db)
+    
+    # Try sending a DM to the user to confirm
+    try:
+        user_obj = await bot.fetch_user(int(discord_id))
+        if user_obj:
+            res_data = await resolve_steam_user(steam_id)
+            if "error" not in res_data:
+                await user_obj.send(content="🎉 Your Steam account has been securely linked!", embed=build_steam_embed(res_data))
+    except Exception as e:
+        print(f"DM Failed: {e}")
+
+    html_content = """
+    <body style="font-family: sans-serif; background: #1a1c1e; color: white; text-align: center; padding-top: 100px;">
+        <h1 style="color: #43b581;">✅ Steam Profile Securely Linked!</h1>
+        <p style="font-size: 18px; color: #b9bbbe;">You can safely close this browser tab and return right to Discord now.</p>
+    </body>
+    """
+    return web.Response(text=html_content, content_type='text/html')
 
 # --- BOT ROUTINE PLATFORM ---
 class ConvoyBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=discord.Intents.default())
 
     async def setup_hook(self):
+        # 1. Sync Discord Commands
         self.tree.copy_global_to(guild=SERVER_OBJ)
         await self.tree.sync(guild=SERVER_OBJ)
+        
+        # 2. Start Background Loop
         if not check_server_id.is_running():
             check_server_id.start()
+            
+        # 3. Start Native Web Server inside Discord's event loop
+        app = web.Application()
+        app.add_routes([
+            web.get('/login/{discord_id}', web_login),
+            web.get('/verify', web_verify)
+        ])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = int(os.getenv("PORT", "8080"))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        print(f"Native Auth Server running on port {port}")
 
 bot = ConvoyBot()
 last_known_id = None
@@ -123,100 +196,65 @@ async def convoyid(interaction: discord.Interaction):
         embed = discord.Embed(title="⚠️ Convoy ID Not Found", description="Server is currently offline.", color=discord.Color.red())
         await interaction.followup.send(embed=embed)
 
-# --- COMMAND 2: IMMUTABLE OPENID LOGIN VIA GLOBAL HANDSHAKE PORTAL ---
-@bot.tree.command(name="link", description="Log in via official Steam OpenID to connect your account profile securely.")
+# --- COMMAND 2: SECURE LINK PORTAL ---
+@bot.tree.command(name="link", description="Securely log in and link your official Steam account.")
 async def link(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    
-    secure_global_auth_url = f"https://steamid.xyz/auth?user={interaction.user.id}"
+    base_url = os.getenv("PUBLIC_URL", "").rstrip('/')
+    if not base_url:
+        await interaction.response.send_message("❌ The bot host configuration is missing the `PUBLIC_URL` variable.", ephemeral=True)
+        return
+        
+    secure_route = f"{base_url}/login/{interaction.user.id}"
     
     embed = discord.Embed(
-        title="🔒 Secure Steam Account Identity Link Portal",
+        title="🔒 Steam Account Identity Link",
         description=(
-            f"Hey {interaction.user.mention}! To link your account seamlessly using your official Steam login credentials:\n\n"
-            f"1. Click the purple **🔐 Sign In With Steam** link button down below.\n"
-            f"2. Complete your login step directly on the secure Steam community interface.\n"
-            f"3. Return right here and press the green **Verify Link** verification button!\n\n"
-            f"*Your personal password and login details remain completely safe, hidden, and invisible to this server.*"
+            f"Hey {interaction.user.mention}! To link your account natively:\n\n"
+            f"1. Click the **🔐 Sign In With Steam** button below.\n"
+            f"2. Complete your login directly on Steam.\n"
+            f"3. You will instantly get a DM confirming you are linked!\n\n"
+            f"*Your account password remains completely safe and invisible to this server.*"
         ),
         color=discord.Color.blue()
     )
     
-    class GlobalVerifyView(discord.ui.View):
-        def __init__(self, target_user_id):
-            super().__init__(timeout=300)
-            self.target_user_id = target_user_id
-            
-        @discord.ui.button(label="✅ Verify My Connection Changes", style=discord.ButtonStyle.green)
-        async def check_link(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
-            if btn_interaction.user.id != self.target_user_id:
-                await btn_interaction.response.send_message("You cannot verify another member's tracking link layout!", ephemeral=True)
-                return
-                
-            await btn_interaction.response.defer(ephemeral=True)
-            
-            poll_api = f"https://api.steamid.xyz/v1/identify/{self.target_user_id}"
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(poll_api, timeout=10) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("verified") and "steamid64" in data:
-                                verified_id64 = str(data["steamid64"])
-                                
-                                db = load_db()
-                                db[str(self.target_user_id)] = verified_id64
-                                save_db(db)
-                                
-                                profile = await resolve_steam_user(verified_id64)
-                                if "error" in profile:
-                                    await btn_interaction.followup.send(content="✅ Successfully verified identity link, but profile data extraction failed.", ephemeral=True)
-                                else:
-                                    await btn_interaction.followup.send(content="🎉 Account successfully synced into the driver database!", embed=build_steam_embed(profile), ephemeral=True)
-                                return
-                                
-                        await btn_interaction.followup.send(content="❌ Verification connection not found yet! Please click the sign-in button above, log into Steam, and click verify again.", ephemeral=True)
-            except Exception as ex:
-                await btn_interaction.followup.send(content=f"❌ Network communication error during handshake verification: {str(ex)}", ephemeral=True)
-
-    view = GlobalVerifyView(interaction.user.id)
-    view.add_item(discord.ui.Button(label="🔐 Sign In With Steam", url=secure_global_auth_url))
-    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="🔐 Sign In With Steam", url=secure_route))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # --- COMMAND 3: TRACKING SEARCH SYSTEM ---
-@bot.tree.command(name="steamid", description="Look up a server member's authenticated profile details seamlessly.")
-@app_commands.describe(target_member="Tag a user in this server (e.g. @DAVIDYTHPH) to fetch their secure profile data card.")
-async def steamid(interaction: discord.Interaction, target_member: discord.Member = None):
+@bot.tree.command(name="steamid", description="Look up a server member's profile.")
+@app_commands.describe(
+    target_member="Tag a user in this server to fetch their secure profile data.",
+    manual_search="Alternatively, paste a custom text username or direct Steam URL link here."
+)
+async def steamid(interaction: discord.Interaction, target_member: discord.Member = None, manual_search: str = None):
     await interaction.response.defer(ephemeral=False)
-    
     db = load_db()
-    search_user = target_member if target_member else interaction.user
-    user_key = str(search_user.id)
     
-    if user_key in db:
-        result = await resolve_steam_user(db[user_key])
-        if "error" in result:
-            await interaction.followup.send(embed=discord.Embed(title="❌ Search Failed", description=result["error"], color=discord.Color.red()))
-        else:
-            await interaction.followup.send(embed=build_steam_embed(result))
+    if manual_search:
+        result = await resolve_steam_user_by_name(manual_search)
     else:
-        steam_target = search_user.display_name
-        result = await resolve_steam_user_by_name(steam_target)
-        if "error" in result and steam_target != search_user.name:
-            result = await resolve_steam_user_by_name(search_user.name)
-
-        if "error" in result:
-            await interaction.followup.send(embed=discord.Embed(
-                title="⚠️ Authenticated Profile Connection Required",
-                description=(
-                    f"This user hasn't securely verified their account profile connections yet.\n\n"
-                    f"💡 **To fix this:** Have {search_user.mention} type and run the `/link` command inside the chat window "
-                    f"to authorize directly with the Steam portal!"
-                ),
-                color=discord.Color.orange()
-            ))
+        search_user = target_member if target_member else interaction.user
+        user_key = str(search_user.id)
+        
+        if user_key in db:
+            result = await resolve_steam_user(db[user_key])
         else:
-            await interaction.followup.send(embed=build_steam_embed(result))
+            steam_target = search_user.display_name
+            result = await resolve_steam_user_by_name(steam_target)
+            if "error" in result and steam_target != search_user.name:
+                result = await resolve_steam_user_by_name(search_user.name)
+
+    if "error" in result:
+        await interaction.followup.send(embed=discord.Embed(
+            title="⚠️ Profile Not Found",
+            description=(f"I could not automatically resolve that user.\n\n"
+                         f"💡 **The Fix:** Have them use `/link` to log in, OR paste their Steam URL into the `manual_search` option!"),
+            color=discord.Color.orange()
+        ))
+    else:
+        await interaction.followup.send(embed=build_steam_embed(result))
 
 @tasks.loop(seconds=60)
 async def check_server_id():
