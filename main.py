@@ -24,7 +24,6 @@ class ConvoyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Secure the tree commands strictly inside your guild right away
         self.tree.copy_global_to(guild=SERVER_OBJ)
         await self.tree.sync(guild=SERVER_OBJ)
         
@@ -33,7 +32,6 @@ class ConvoyBot(commands.Bot):
 
 bot = ConvoyBot()
 last_known_id = None
-has_posted_initial = False
 
 def fetch_convoy_id():
     try:
@@ -75,7 +73,7 @@ def resolve_steam_user(input_string):
             if res.get("response", {}).get("success") == 1:
                 steam_id_64 = res["response"]["steamid"]
             else:
-                return {"error": f"Could not find a Steam profile matching `{input_string}`."}
+                return {"error": f"Could not locate a public Steam profile matching identifier: `{input_string}`."}
         except Exception:
             return {"error": "Failed to communicate with Steam API servers."}
 
@@ -109,12 +107,8 @@ def build_steam_embed(result):
     embed.set_thumbnail(url=result["avatar"])
     embed.add_field(name="🌐 SteamID64 (Default format)", value=f"`{result['id64']}`", inline=False)
     embed.add_field(name="🆔 SteamID3 (Config/Server format)", value=f"`{result['id3']}`", inline=False)
+    embed.set_footer(text="Useful for adding admin privileges to server config profiles")
     return embed
-
-@bot.event
-async def on_ready():
-    print(f"Bot successfully registered on gateway. Online as: {bot.user}")
-    print("Direct Server Sync completed successfully through setup hook.")
 
 # --- COMMAND 1: CONVOY FETCH ---
 @bot.tree.command(name="convoyid", description="Fetch the current live ETS2 Convoy Search ID.")
@@ -130,31 +124,44 @@ async def convoyid(interaction: discord.Interaction):
         embed = discord.Embed(title="⚠️ Convoy ID Not Found", description="Server is currently offline or crashing.", color=discord.Color.red())
         await interaction.followup.send(embed=embed)
 
-# --- COMMAND 2: SINGLE UNIFIED STEAM ID COMMAND ---
+# --- COMMAND 2: SINGLE UNIFIED DROPDOWN STEAM ID ---
 @bot.tree.command(name="steamid", description="Look up yours or a friend's Steam structural ID profiles.")
-@app_commands.describe(target="Type 'me' for help, or paste a friend's Steam URL/username.")
-async def steamid(interaction: discord.Interaction, target: str):
+@app_commands.choices(type=[
+    app_commands.Choice(name="👤 Myself", value="me"),
+    app_commands.Choice(name="👥 A Friend", value="friend")
+])
+@app_commands.describe(
+    type="Select if you want to look up yourself or an external friend.",
+    friend_identifier="If looking up a friend, type their Steam username, URL, or custom profile text here."
+)
+async def steamid(interaction: discord.Interaction, type: app_commands.Choice[str], friend_identifier: str = None):
     await interaction.response.defer(ephemeral=False)
     
-    if target.strip().lower() == "me":
-        embed = discord.Embed(
-            title="🌐 Quick Profile Checker Guide", 
-            description=(
-                f"Hey {interaction.user.mention}! To check an account, simply pass their custom Steam name "
-                f"or profile link directly into the target input box!\n\n"
-                f"**Example Usage:**\n"
-                f"`/steamid target: your_steam_username`\n"
-                f"`/steamid target: https://steamcommunity.com/profiles/76561197960265728`"
-            ), 
-            color=discord.Color.blue()
-        )
-        await interaction.followup.send(embed=embed)
-        return
+    if type.value == "me":
+        # The bot automatically captures their active custom display name or account profile handle
+        steam_target = interaction.user.display_name
+    else:
+        if not friend_identifier:
+            embed = discord.Embed(
+                title="❌ Missing Input Data",
+                description="When selecting the **A Friend** option, you must supply their username or URL inside the `friend_identifier` box prompt!",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        steam_target = friend_identifier
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, resolve_steam_user, target)
+    result = await loop.run_in_executor(None, resolve_steam_user, steam_target)
     
     if "error" in result:
+        # Fallback check option: If using your display name fails (e.g. they use special emoji characters), try their login username
+        if type.value == "me" and steam_target != interaction.user.name:
+            result_fallback = await loop.run_in_executor(None, resolve_steam_user, interaction.user.name)
+            if "error" not in result_fallback:
+                await interaction.followup.send(embed=build_steam_embed(result_fallback))
+                return
+        
         await interaction.followup.send(embed=discord.Embed(title="❌ Search Failed", description=result["error"], color=discord.Color.red()))
     else:
         await interaction.followup.send(embed=build_steam_embed(result))
@@ -162,7 +169,7 @@ async def steamid(interaction: discord.Interaction, target: str):
 # --- BACKGROUND AUTOMATION LOOP ---
 @tasks.loop(seconds=60)
 async def check_server_id():
-    global last_known_id, has_posted_initial
+    global last_known_id
     if CHANNEL_ID == 0: return
     channel = bot.get_channel(CHANNEL_ID)
     if not channel: return
@@ -172,7 +179,6 @@ async def check_server_id():
     
     if current_id and current_id != last_known_id:
         last_known_id = current_id
-        has_posted_initial = True
         embed = discord.Embed(title="🚚 Euro Truck Simulator 2 Server Online!", description=f"**Search ID:** `{current_id}`", color=discord.Color.green())
         await channel.send(embed=embed)
 
