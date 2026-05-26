@@ -110,12 +110,10 @@ async def web_verify(request):
         
     steam_id = claimed_id.split("/id/")[-1]
     
-    # Run database saving inside standard event thread executors to avoid loop blocking
     db = load_db()
     db[str(discord_id)] = str(steam_id)
     save_db(db)
     
-    # Send verification embed to the user asynchronously using Sanic background tasks
     async def send_notification(app):
         try:
             user_obj = await bot.fetch_user(int(discord_id))
@@ -221,7 +219,6 @@ async def steamid(interaction: discord.Interaction, target_member: discord.Membe
         else:
             await interaction.followup.send(embed=build_steam_embed(result))
     else:
-        # If not linked via openID, check by text handle matching as fallback
         steam_target = search_user.display_name
         result = await resolve_steam_user_by_name(steam_target)
         if "error" in result and steam_target != search_user.name:
@@ -267,4 +264,4 @@ async def main():
     )
 
 if __name__ == "__main__":
-    asyncio.run=asyncio.run(main())
+    asyncio.run(main())
