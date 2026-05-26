@@ -3,7 +3,13 @@ from discord.ext import tasks, commands
 import asyncio
 import os
 import re
+import sys
 from playwright.async_api import async_playwright
+
+# --- AUTOMATIC BROWSER INSTALLATION FOR RAILWAY ---
+# This forces the server to download Chromium on startup if it's missing
+print("Checking for Playwright browsers...")
+os.system("python -m playwright install chromium")
 
 # --- CONFIGURATION FROM ENVIRONMENT VARIABLES ---
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -18,9 +24,10 @@ last_known_id = None
 
 async def fetch_convoy_id():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
-        page = await browser.new_page()
         try:
+            # Added headless shell argument for cloud compatibility
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--single-process'])
+            page = await browser.new_page()
             await page.goto(PANEL_URL, timeout=60000)
             await page.wait_for_load_state("networkidle")
             
@@ -33,12 +40,16 @@ async def fetch_convoy_id():
             print(f"Error scraping panel: {e}")
             return None
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except:
+                pass
 
 @bot.event
 async def on_ready():
     print(f"Bot is online as {bot.user}")
-    check_server_id.start()
+    if not check_server_id.is_running():
+        check_server_id.start()
 
 @tasks.loop(seconds=60)
 async def check_server_id():
@@ -47,9 +58,12 @@ async def check_server_id():
         return
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
+        print(f"Could not find channel with ID {CHANNEL_ID}")
         return
 
     current_id = await fetch_convoy_id()
+    print(f"Scraped ID from panel: {current_id}") # Log this to monitor progress
+    
     if current_id and current_id != last_known_id:
         last_known_id = current_id
         embed = discord.Embed(
