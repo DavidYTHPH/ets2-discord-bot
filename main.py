@@ -5,7 +5,7 @@ import asyncio
 import os
 import re
 import json
-import requests
+import aiohttp
 from sanic import Sanic, response
 
 # --- CONFIGURATION FROM ENVIRONMENT VARIABLES ---
@@ -33,29 +33,47 @@ def load_db():
 def save_db(data):
     with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
 
-# --- STEAM DETAILED PROFILE RESOLVER ---
-def resolve_steam_user(steam_id_64):
+# --- ASYNCHRONOUS STEAM PROFILE RESOLVER ---
+async def resolve_steam_user(steam_id_64):
     if not STEAM_API_KEY:
         return {"error": "Steam API Key variable is missing in Railway configurations."}
     summary_url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={STEAM_API_KEY}&steamids={steam_id_64}"
     try:
-        summary_res = requests.get(summary_url, timeout=10).json()
-        players = summary_res.get("response", {}).get("players", [])
-        if not players: return {"error": "Profile details are private or hidden."}
-        
-        player_data = players[0]
-        id_num = int(steam_id_64)
-        steam_id_3 = f"[U:1:{id_num - 76561197960265728}]"
-        
-        return {
-            "name": player_data.get("personaname", "Unknown User"),
-            "url": player_data.get("profileurl", ""),
-            "avatar": player_data.get("avatarfull", ""),
-            "id64": str(steam_id_64),
-            "id3": steam_id_3
-        }
-    except Exception:
-        return {"error": "Error processing Steam profile details."}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(summary_url, timeout=10) as resp:
+                if resp.status != 200:
+                    return {"error": "Failed to connect to Steam database servers."}
+                data = await resp.json()
+                players = data.get("response", {}).get("players", [])
+                if not players: return {"error": "Profile details are private or hidden."}
+                
+                player_data = players[0]
+                id_num = int(steam_id_64)
+                steam_id_3 = f"[U:1:{id_num - 76561197960265728}]"
+                
+                return {
+                    "name": player_data.get("personaname", "Unknown User"),
+                    "url": player_data.get("profileurl", ""),
+                    "avatar": player_data.get("avatarfull", ""),
+                    "id64": str(steam_id_64),
+                    "id3": steam_id_3
+                }
+    except Exception as e:
+        return {"error": f"Error processing Steam profile details: {str(e)}"}
+
+async def resolve_steam_user_by_name(name_string):
+    if not STEAM_API_KEY: return {"error": "Steam Key Missing."}
+    resolve_url = f"https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={STEAM_API_KEY}&vanityurl={name_string}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(resolve_url, timeout=10) as resp:
+                if resp.status != 200: return {"error": "Steam server error."}
+                data = await resp.json()
+                if data.get("response", {}).get("success") == 1:
+                    return await resolve_steam_user(data["response"]["steamid"])
+                return {"error": f"Could not find a matching public Steam profile for string name: `{name_string}`."}
+    except:
+        return {"error": "Failed to connect to Steam database servers."}
 
 def build_steam_embed(result):
     embed = discord.Embed(title=f"👤 Steam Account: {result['name']}", url=result["url"], color=discord.Color.blue())
@@ -90,22 +108,25 @@ async def web_verify(request):
     if not discord_id or not claimed_id:
         return response.html("<h3>❌ Authentication arguments missing or corrupted.</h3>", status=400)
         
-    # Extract structural numeric SteamID64 from OpenID verification identity URL string string
     steam_id = claimed_id.split("/id/")[-1]
     
+    # Run database saving inside standard event thread executors to avoid loop blocking
     db = load_db()
     db[str(discord_id)] = str(steam_id)
     save_db(db)
     
-    # Try sending a celebration message to the user dynamically via background hooks
-    try:
-        user_obj = bot.get_user(int(discord_id))
-        if user_obj:
-            res_data = resolve_steam_user(steam_id)
-            if "error" not in res_data:
-                await user_obj.send(content="🎉 Your profile link has been verified successfully!", embed=build_steam_embed(res_data))
-    except Exception as e:
-        print(f"Background verification notification error: {e}")
+    # Send verification embed to the user asynchronously using Sanic background tasks
+    async def send_notification(app):
+        try:
+            user_obj = await bot.fetch_user(int(discord_id))
+            if user_obj:
+                res_data = await resolve_steam_user(steam_id)
+                if "error" not in res_data:
+                    await user_obj.send(content="🎉 Your profile link has been verified successfully!", embed=build_steam_embed(res_data))
+        except Exception as e:
+            print(f"Background verification notification error: {e}")
+
+    request.app.add_task(send_notification)
 
     return response.html("""
     <body style="font-family: sans-serif; background: #1a1c1e; color: white; text-align: center; padding-top: 100px;">
@@ -131,13 +152,25 @@ class ConvoyBot(commands.Bot):
 bot = ConvoyBot()
 last_known_id = None
 
+async def fetch_convoy_id():
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        cookies = {}
+        if PANEL_COOKIE: cookies = {"errors": PANEL_COOKIE, "messages": PANEL_COOKIE}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(LOGS_URL, headers=headers, cookies=cookies, timeout=15) as resp:
+                if resp.status != 200: return None
+                html = await resp.text()
+                match = re.search(r"(\d{14,19}/\d{2,3})", html)
+                if match: return match.group(1)
+                return None
+    except: return None
+
 # --- COMMAND 1: CONVOY FETCH ---
 @bot.tree.command(name="convoyid", description="Fetch the current live ETS2 Convoy Search ID.")
 async def convoyid(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
-    from main import fetch_convoy_id
-    loop = asyncio.get_event_loop()
-    current_id = await loop.run_in_executor(None, fetch_convoy_id)
+    current_id = await fetch_convoy_id()
     if current_id:
         embed = discord.Embed(title="🚚 Live Convoy Status", description=f"**Search ID:** `{current_id}`", color=discord.Color.green())
         await interaction.followup.send(embed=embed)
@@ -182,35 +215,30 @@ async def steamid(interaction: discord.Interaction, target_member: discord.Membe
     user_key = str(search_user.id)
     
     if user_key in db:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, resolve_steam_user, db[user_key])
+        result = await resolve_steam_user(db[user_key])
         if "error" in result:
             await interaction.followup.send(embed=discord.Embed(title="❌ Search Failed", description=result["error"], color=discord.Color.red()))
         else:
             await interaction.followup.send(embed=build_steam_embed(result))
     else:
-        await interaction.followup.send(embed=discord.Embed(
-            title="⚠️ Authenticated Profile Connection Required",
-            description=(
-                f"This user hasn't securely verified their account profile connections yet.\n\n"
-                f"💡 **To fix this:** Have {search_user.mention} type and run the `/link` command inside the chat window "
-                f"to authorize directly with the Steam portal!"
-            ),
-            color=discord.Color.orange()
-        ))
+        # If not linked via openID, check by text handle matching as fallback
+        steam_target = search_user.display_name
+        result = await resolve_steam_user_by_name(steam_target)
+        if "error" in result and steam_target != search_user.name:
+            result = await resolve_steam_user_by_name(search_user.name)
 
-def fetch_convoy_id():
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        cookies = {}
-        if PANEL_COOKIE: cookies = {"errors": PANEL_COOKIE, "messages": PANEL_COOKIE}
-        res = requests.get(LOGS_URL, headers=headers, cookies=cookies, timeout=15)
-        if res.status_code != 200: return None
-        html = res.text
-        match = re.search(r"(\d{14,19}/\d{2,3})", html)
-        if match: return match.group(1)
-        return None
-    except: return None
+        if "error" in result:
+            await interaction.followup.send(embed=discord.Embed(
+                title="⚠️ Authenticated Profile Connection Required",
+                description=(
+                    f"This user hasn't securely verified their account profile connections yet.\n\n"
+                    f"💡 **To fix this:** Have {search_user.mention} type and run the `/link` command inside the chat window "
+                    f"to authorize directly with the Steam portal!"
+                ),
+                color=discord.Color.orange()
+            ))
+        else:
+            await interaction.followup.send(embed=build_steam_embed(result))
 
 @tasks.loop(seconds=60)
 async def check_server_id():
@@ -218,8 +246,7 @@ async def check_server_id():
     if CHANNEL_ID == 0: return
     channel = bot.get_channel(CHANNEL_ID)
     if not channel: return
-    loop = asyncio.get_event_loop()
-    current_id = await loop.run_in_executor(None, fetch_convoy_id)
+    current_id = await fetch_convoy_id()
     if current_id and current_id != last_known_id:
         last_known_id = current_id
         embed = discord.Embed(title="🚚 Euro Truck Simulator 2 Server Online!", description=f"**Search ID:** `{current_id}`", color=discord.Color.green())
@@ -227,7 +254,6 @@ async def check_server_id():
 
 # --- UNIFIED MULTI-ENGINE CONCURRENT RUNNER ---
 async def main():
-    # Bind the web instance explicitly to the port provided by Railway
     server = await web_app.create_server(
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8080")),
@@ -235,11 +261,10 @@ async def main():
     )
     await server.startup()
     
-    # Fire up both the Discord Client Gateway connection loop and the Sanic web server asynchronously
     await asyncio.gather(
         bot.start(TOKEN),
         server.after_start()
     )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run=asyncio.run(main())
